@@ -1,0 +1,190 @@
+#!/bin/sh /etc/rc.common
+
+# 启动优先级 (99 表示在系统和网络完全启动后再执行)
+START=99
+# 停止优先级
+STOP=10
+
+# ================= 配置区 =================
+WG_IFACE="wg_aws"
+NFT_TABLE="fw4"
+NFT_FILE="/etc/nftables.d/gfwlist.nft"
+DNSMASQ_CONF="/etc/dnsmasq.d/gfw-proxy.conf"
+
+MARK_GFW="0x1"
+TABLE_GFW="100"
+# ==========================================
+
+start() {
+    echo "🚀 [wg_route] 开始配置 wg_aws 分流环境..."
+
+    # --------------------------------------------------
+    # 1. 生成 nftables 规则并写入防火墙 UCI
+    # --------------------------------------------------
+    mkdir -p /etc/nftables.d
+    cat << EOF > "$NFT_FILE"
+    
+# --- Sets ---
+set gfw_list_v4 {
+    type ipv4_addr
+    flags interval
+    elements = {
+        8.8.8.8, 119.29.29.29,
+        # Telegram IPv4 (AS62041 / AS62014)
+        91.108.4.0/22, 91.108.8.0/22, 91.108.12.0/22,
+        91.108.16.0/22, 91.108.20.0/22, 91.108.56.0/22,
+        149.154.160.0/20
+    }
+}
+set gfw_list_v6 {
+    type ipv6_addr
+    flags interval
+    elements = {
+        # Telegram IPv6
+        2001:b28:f23d::/48, 2001:b28:f23f::/48, 2001:67c:4e8::/48
+    }
+}
+
+# --- Chains ---
+chain prerouting_wg {
+    type filter hook prerouting priority mangle; policy accept;
+    ip daddr @gfw_list_v4 meta mark set $MARK_GFW
+    ip6 daddr @gfw_list_v6 meta mark set $MARK_GFW
+}
+
+chain output_wg {
+    type route hook output priority mangle; policy accept;
+    ip daddr @gfw_list_v4 meta mark set $MARK_GFW
+    ip6 daddr @gfw_list_v6 meta mark set $MARK_GFW
+}
+
+chain masq_wg {
+    type nat hook postrouting priority srcnat; policy accept;
+    oifname "$WG_IFACE" meta mark $MARK_GFW masquerade
+}
+
+EOF
+    
+    # 检查并配置防火墙 include (避免重复写入影响闪存寿命)
+    if [ "$(uci -q get firewall.gfw_nft.path)" != "/usr/sbin/nft -f $NFT_FILE" ]; then
+        uci -q delete firewall.gfw_nft
+        uci set firewall.gfw_nft=include
+        uci set firewall.gfw_nft.type='script'
+        uci set firewall.gfw_nft.path="/usr/sbin/nft -f $NFT_FILE"
+        uci set firewall.gfw_nft.fw4_compatible='1'
+        uci commit firewall
+    fi
+    # 重新加载防火墙和直接应用 nft 表
+    fw4 reload 2>/dev/null || /etc/init.d/firewall reload
+    nft -f "$NFT_FILE"
+    echo "✅ [wg_route] nftables 规则已生成并加载"
+
+    # --------------------------------------------------
+    # 2. 生成 dnsmasq 配置并重启服务
+    # --------------------------------------------------
+    if ! grep -q "conf-dir=/etc/dnsmasq.d" /etc/dnsmasq.conf 2>/dev/null; then
+        mkdir -p /etc/dnsmasq.d
+        echo "conf-dir=/etc/dnsmasq.d" >> /etc/dnsmasq.conf
+    fi
+
+    # 调用 update-proxy-domains.sh 下载 gfwlist 并生成 dnsmasq 规则
+    # 通过 BIND_IFACE 指定走 wg_aws 接口下载，绕过 GFW 封锁
+    local update_ok=0
+    SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+    if [ -x "$SCRIPT_DIR/update-proxy-domains.sh" ]; then
+        BIND_IFACE="$WG_IFACE" "$SCRIPT_DIR/update-proxy-domains.sh" && update_ok=1
+    elif [ -x "/etc/gfwlist/update-proxy-domains.sh" ]; then
+        BIND_IFACE="$WG_IFACE" /etc/gfwlist/update-proxy-domains.sh && update_ok=1
+    fi
+
+    # 如果更新脚本失败或不存在，生成包含 Google 和 GitHub 核心域名的最小配置
+    if [ "$update_ok" -eq 0 ] && [ ! -s "$DNSMASQ_CONF" ]; then
+        echo "⚠️  [wg_route] update-proxy-domains.sh 执行失败，生成最小 fallback 配置..."
+        DNS="8.8.8.8"
+        NFT_V4="4#inet#$NFT_TABLE#gfw_list_v4"
+        NFT_V6="6#inet#$NFT_TABLE#gfw_list_v6"
+
+        # Google + GitHub 核心域名
+        FALLBACK_DOMAINS="
+            google.com google.com.hk google.co.jp google.com.tw
+            google.dev google.org google.net
+            googleapis.com googleusercontent.com googlevideo.com
+            gstatic.com gmail.com youtube.com youtu.be
+            blogspot.com blogger.com ampproject.org
+            ggpht.com googleadservices.com googlesyndication.com
+            github.com github.io githubusercontent.com
+            githubapp.com githubassets.com ghcr.io
+            github.dev github.blog npmjs.com npmjs.org
+        "
+
+        {
+            echo "# Fallback: 由 wg_route 自动生成的最小代理域名配置"
+            for d in $FALLBACK_DOMAINS; do
+                echo "server=/$d/$DNS"
+                echo "nftset=/$d/$NFT_V4,$NFT_V6"
+            done
+        } > "$DNSMASQ_CONF"
+
+        /etc/init.d/dnsmasq restart
+    fi
+    echo "✅ [wg_route] dnsmasq 配置已生效"
+
+    # --------------------------------------------------
+    # 3. 配置 network 策略路由并重启网络
+    # --------------------------------------------------
+    local net_changed=0
+
+    # 如果路由还没加进去，才修改 UCI (保护闪存)
+    if [ "$(uci -q get network.rule_gfw_v4.mark)" != "$MARK_GFW" ]; then
+        uci set network.rule_gfw_v4=rule; uci set network.rule_gfw_v4.mark="$MARK_GFW"; uci set network.rule_gfw_v4.lookup="$TABLE_GFW"
+        uci set network.route_gfw_v4=route; uci set network.route_gfw_v4.interface="$WG_IFACE"; uci set network.route_gfw_v4.table="$TABLE_GFW"; uci set network.route_gfw_v4.target='0.0.0.0/0'
+        
+        uci set network.rule_gfw_v6=rule6; uci set network.rule_gfw_v6.mark="$MARK_GFW"; uci set network.rule_gfw_v6.lookup="$TABLE_GFW"
+        uci set network.route_gfw_v6=route6; uci set network.route_gfw_v6.interface="$WG_IFACE"; uci set network.route_gfw_v6.table="$TABLE_GFW"; uci set network.route_gfw_v6.target='::/0'
+
+        uci commit network
+        net_changed=1
+    fi
+
+    if [ "$net_changed" -eq 1 ]; then
+        /etc/init.d/network restart
+        echo "✅ [wg_route] 路由规则已写入 UCI 并重启网络"
+    else
+        echo "✅ [wg_route] 路由规则已存在，跳过网络重启"
+    fi
+    echo "🎉 [wg_route] 启动完成！"
+}
+
+stop() {
+    echo "🛑 [wg_route] 正在清理并恢复环境..."
+
+    # 1. 恢复 dnsmasq
+    rm -f "$DNSMASQ_CONF"
+    /etc/init.d/dnsmasq restart
+    echo "✅ [wg_route] dnsmasq 配置已移除"
+
+    # 2. 恢复 nftables 与防火墙 (逐个删除 chain 和 set，不能删整个 fw4 表)
+    nft delete chain inet "$NFT_TABLE" masq_wg 2>/dev/null
+    nft delete chain inet "$NFT_TABLE" output_wg 2>/dev/null
+    nft delete chain inet "$NFT_TABLE" prerouting_wg 2>/dev/null
+    nft delete set inet "$NFT_TABLE" gfw_list_v4 2>/dev/null
+    nft delete set inet "$NFT_TABLE" gfw_list_v6 2>/dev/null
+    rm -f "$NFT_FILE"
+    uci -q delete firewall.gfw_nft
+    uci commit firewall
+    fw4 reload 2>/dev/null || /etc/init.d/firewall reload
+    echo "✅ [wg_route] nftables chains/sets 已从 $NFT_TABLE 移除"
+
+    # 3. 恢复 network 路由
+    if [ "$(uci -q get network.rule_gfw_v4.mark)" = "$MARK_GFW" ]; then
+        uci -q delete network.rule_gfw_v4
+        uci -q delete network.route_gfw_v4
+        uci -q delete network.rule_gfw_v6
+        uci -q delete network.route_gfw_v6
+
+        uci commit network
+        /etc/init.d/network restart
+        echo "✅ [wg_route] 网络路由 UCI 配置已清理并重启网络"
+    fi
+    echo "🎉 [wg_route] 清理完成！"
+}
