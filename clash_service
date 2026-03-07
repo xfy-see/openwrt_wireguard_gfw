@@ -1,0 +1,168 @@
+#!/bin/sh /etc/rc.common
+
+# Clash Premium init.d 服务脚本
+# 功能: 开机时挂载 32M tmpfs → 下载 clash premium → 使用本地 config.yaml 启动
+# 安装: cp clash_service /etc/init.d/clash && chmod +x /etc/init.d/clash
+# 启用: /etc/init.d/clash enable
+# 手动: /etc/init.d/clash start|stop|restart
+
+START=99
+STOP=10
+
+# ================= 配置区 =================
+# tmpfs 挂载点和大小
+CLASH_DIR="/tmp/clash"
+TMPFS_SIZE="32M"
+
+# 本地配置文件路径 (持久存储)
+CONFIG_FILE="/etc/clash/config.yaml"
+
+# Clash Premium 下载地址 (mipsel_24kc / linux-mipsle-softfloat)
+# ⚠️ Clash Premium 原版已停止维护，以下使用社区镜像
+# 如需更换版本或镜像源，修改此 URL 即可
+CLASH_URL="https://github.com/zhongfly/Clash-premium-backup/releases/download/2023-09-05-gdcc8d87/clash-linux-mipsle-softfloat-2023-09-05-gdcc8d87.gz"
+
+# clash 二进制文件名
+CLASH_BIN="$CLASH_DIR/clash"
+
+# PID 文件
+PID_FILE="/var/run/clash.pid"
+
+# 日志文件 (放在 tmpfs 中，不消耗闪存)
+LOG_FILE="$CLASH_DIR/clash.log"
+# ==========================================
+
+start() {
+    echo "🚀 [clash] 正在启动 Clash Premium 服务..."
+
+    # 检查是否已在运行
+    if [ -f "$PID_FILE" ] && kill -0 "$(cat "$PID_FILE")" 2>/dev/null; then
+        echo "⚠️  [clash] 服务已在运行 (PID: $(cat "$PID_FILE"))，跳过启动"
+        return 0
+    fi
+
+    # --------------------------------------------------
+    # 1. 检查本地配置文件是否存在
+    # --------------------------------------------------
+    if [ ! -f "$CONFIG_FILE" ]; then
+        echo "❌ [clash] 配置文件不存在: $CONFIG_FILE"
+        echo "   请先创建配置文件再启动服务"
+        return 1
+    fi
+
+    # --------------------------------------------------
+    # 2. 挂载 32M tmpfs
+    # --------------------------------------------------
+    if ! mountpoint -q "$CLASH_DIR" 2>/dev/null; then
+        mkdir -p "$CLASH_DIR"
+        mount -t tmpfs -o size="$TMPFS_SIZE",mode=0755 tmpfs "$CLASH_DIR"
+        if [ $? -ne 0 ]; then
+            echo "❌ [clash] tmpfs 挂载失败"
+            return 1
+        fi
+        echo "✅ [clash] 已挂载 ${TMPFS_SIZE} tmpfs → $CLASH_DIR"
+    else
+        echo "✅ [clash] tmpfs 已存在，跳过挂载"
+    fi
+
+    # --------------------------------------------------
+    # 3. 下载 Clash Premium 二进制文件
+    # --------------------------------------------------
+    if [ ! -x "$CLASH_BIN" ]; then
+        echo "📥 [clash] 正在下载 Clash Premium..."
+
+        local tmp_gz="$CLASH_DIR/clash.gz"
+
+        # 下载压缩包
+        wget -q --no-check-certificate -O "$tmp_gz" "$CLASH_URL"
+        if [ $? -ne 0 ] || [ ! -s "$tmp_gz" ]; then
+            echo "❌ [clash] 下载失败，请检查网络或 URL"
+            echo "   URL: $CLASH_URL"
+            rm -f "$tmp_gz"
+            return 1
+        fi
+
+        # 解压
+        gzip -d "$tmp_gz"
+        if [ $? -ne 0 ]; then
+            echo "❌ [clash] 解压失败"
+            rm -f "$tmp_gz"
+            return 1
+        fi
+
+        # 重命名并赋予执行权限
+        # gzip -d 会去掉 .gz 后缀，结果就是 $CLASH_DIR/clash
+        chmod +x "$CLASH_BIN"
+
+        echo "✅ [clash] 下载并解压完成: $CLASH_BIN"
+    else
+        echo "✅ [clash] 二进制文件已存在，跳过下载"
+    fi
+
+    # --------------------------------------------------
+    # 4. 启动 Clash
+    # --------------------------------------------------
+    # 将 config.yaml 软链接到 tmpfs 工作目录
+    ln -sf "$CONFIG_FILE" "$CLASH_DIR/config.yaml"
+
+    # 创建缓存目录 (Country.mmdb 等)
+    mkdir -p "$CLASH_DIR/cache"
+
+    # 后台启动 clash，日志写入 tmpfs
+    "$CLASH_BIN" -d "$CLASH_DIR" > "$LOG_FILE" 2>&1 &
+    local pid=$!
+
+    # 等待 2 秒检查进程是否存活
+    sleep 2
+    if kill -0 "$pid" 2>/dev/null; then
+        echo "$pid" > "$PID_FILE"
+        echo "🎉 [clash] Clash Premium 启动成功 (PID: $pid)"
+        echo "   配置: $CONFIG_FILE"
+        echo "   日志: $LOG_FILE"
+    else
+        echo "❌ [clash] 启动失败，请检查日志:"
+        cat "$LOG_FILE" 2>/dev/null
+        return 1
+    fi
+}
+
+stop() {
+    echo "🛑 [clash] 正在停止 Clash Premium 服务..."
+
+    # 停止 clash 进程
+    if [ -f "$PID_FILE" ]; then
+        local pid
+        pid=$(cat "$PID_FILE")
+        if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+            # 等待进程退出 (最多 5 秒)
+            local i=0
+            while [ $i -lt 5 ] && kill -0 "$pid" 2>/dev/null; do
+                sleep 1
+                i=$((i + 1))
+            done
+            # 如果还没退出，强制 kill
+            if kill -0 "$pid" 2>/dev/null; then
+                kill -9 "$pid"
+                echo "⚠️  [clash] 进程未响应，已强制终止"
+            fi
+            echo "✅ [clash] 进程已停止 (PID: $pid)"
+        else
+            echo "⚠️  [clash] 进程已不存在"
+        fi
+        rm -f "$PID_FILE"
+    else
+        # 尝试通过进程名查杀
+        killall clash 2>/dev/null
+        echo "✅ [clash] 已发送停止信号"
+    fi
+
+    # 卸载 tmpfs
+    if mountpoint -q "$CLASH_DIR" 2>/dev/null; then
+        umount "$CLASH_DIR"
+        echo "✅ [clash] tmpfs 已卸载"
+    fi
+    rm -rf "$CLASH_DIR"
+
+    echo "🎉 [clash] 服务已完全停止"
+}
