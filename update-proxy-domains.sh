@@ -2,8 +2,8 @@
 
 # ================= 配置区域 =================
 # 存放 dnsmasq 自定义配置的目录
-#CONF_DIR="/etc/dnsmasq.d"
-CONF_DIR="./"
+CONF_DIR="/etc/dnsmasq.d"
+#CONF_DIR="./"
 # 生成的配置文件名
 PROXY_CONF="$CONF_DIR/gfw-proxy.conf"
 
@@ -17,10 +17,7 @@ NFT_SET_V6="gfw_list_v6"
 
 # 规则源 URL (这里使用 Loyalsoldier 整理的纯域名 gfwlist 列表)
 # 主URL和备用CDN地址
-RULE_URLS=(
-    "https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/gfw.txt"
-    "https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/gfw.txt"
-)
+RULE_URLS="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/gfw.txt https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/gfw.txt"
 TMP_FILE="/tmp/gfw_raw.txt"
 
 # 下载绑定的网络接口 (可通过环境变量 BIND_IFACE 传入，如 wg_aws)
@@ -47,10 +44,10 @@ if [ -n "$BIND_IFACE" ]; then
 fi
 
 # 尝试从多个URL下载，直到成功
-for url in "${RULE_URLS[@]}"; do
+for url in $RULE_URLS; do
     echo "[*] 尝试从 $url 下载..."
     wget $WGET_BIND -q -O "$TMP_FILE" "$url"
-    
+
     if [ -s "$TMP_FILE" ]; then
         echo "[√] 从 $url 下载成功！"
         break
@@ -64,7 +61,7 @@ if [ ! -s "$TMP_FILE" ]; then
 fi
 
 # 追加 gfw.txt 中缺失的域名 (例如 .google 结尾的域名)
-EXTRA_DOMAINS="google antigravity.google"
+EXTRA_DOMAINS="google antigravity.google openai.com chatgpt.com"
 for d in $EXTRA_DOMAINS; do
     if ! grep -qx "$d" "$TMP_FILE"; then
         echo "$d" >> "$TMP_FILE"
@@ -81,18 +78,18 @@ BEGIN {
 {
     # 跳过空行和注释行
     if ($1 == "" || $1 ~ /^#/) next;
-    
+
     # 清理可能存在的 Windows 换行符 (\r)
     gsub(/\r/, "", $1);
-    
+
     domain = $1;
-    
+
     # 1. 生成 DNS 转发规则 (防污染)
     printf("server=/%s/%s\n", domain, dns);
-    
+
     # 2. 生成 IPv4 的 nftset 规则
     printf("nftset=/%s/4#%s#%s\n", domain, tbl, set4);
-    
+
     # 3. 生成 IPv6 的 nftset 规则
     printf("nftset=/%s/6#%s#%s\n", domain, tbl, set6);
 }' "$TMP_FILE" > "$PROXY_CONF"
