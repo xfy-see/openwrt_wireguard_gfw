@@ -19,6 +19,16 @@ start() {
     echo "🚀 [wg_route] 开始配置 wg_aws 分流环境..."
 
     # --------------------------------------------------
+    # 0. 检查并安装 dnsmasq-full
+    # --------------------------------------------------
+    if ! opkg list-installed 2>/dev/null | grep -q "dnsmasq-full"; then
+        echo "📦 [wg_route] 正在安装 dnsmasq-full (支持 nftset)..."
+        opkg update
+        opkg remove dnsmasq 2>/dev/null
+        opkg install dnsmasq-full
+    fi
+
+    # --------------------------------------------------
     # 1. 生成 nftables 规则并写入防火墙 UCI
     # --------------------------------------------------
     mkdir -p /etc/nftables.d
