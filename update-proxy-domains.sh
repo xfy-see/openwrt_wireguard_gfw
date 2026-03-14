@@ -61,7 +61,7 @@ if [ ! -s "$TMP_FILE" ]; then
 fi
 
 # 追加 gfw.txt 中缺失的域名 (例如 .google 结尾的域名)
-EXTRA_DOMAINS="google antigravity.google openai.com chatgpt.com"
+EXTRA_DOMAINS="google antigravity.google openai.com chatgpt.com claude.ai anthropic.com chat.com chatgpt.livekit.cloud host.livekit.cloud oaistatic.com oaiusercontent.com claude.com claudeusercontent.com claudemcpclient.com servd-anthropic-website.b-cdn.net gemini.google.com generativelanguage.googleapis.com aistudio.google.com deepmind.com deepmind.google google-deepmind.com"
 for d in $EXTRA_DOMAINS; do
     if ! grep -qx "$d" "$TMP_FILE"; then
         echo "$d" >> "$TMP_FILE"
