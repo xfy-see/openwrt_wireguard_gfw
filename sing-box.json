@@ -39,30 +39,26 @@
   },
   "inbounds": [
     {
+      "type": "tun",
+      "interface_name": "utun",
+      "address": "172.19.0.1/30",
+      "auto_route": true,
+      "strict_route": true,
+      "stack": "gvisor",
+      "sniff": true,
+      "route_exclude_address": [
+        "192.168.0.0/16", // 排除本地局域网 IPv4
+        "10.0.0.0/8", // 排除大内网段
+        "fd42:42:42::/64" // 排除大内网段 IPv6 
+      ]
+    },
+    {
       "type": "mixed",
       "tag": "mixed-in",
-      "listen": "::",
+      "listen": "0.0.0.0",
       "listen_port": 7890,
       "sniff": true,
       "sniff_override_destination": true
-    },
-    {
-      "type": "tun",
-      "tag": "tun-in",
-      "address": [
-        "172.19.0.1/30",
-        "fdfe:dcba:9876::1/126"
-      ],
-      "auto_route": false,
-      "strict_route": false,
-      "stack": "system",
-      "sniff": true,
-      "sniff_override_destination": true,
-      "route_exclude_address": [
-        "192.168.0.0/16",
-        "10.0.0.0/8",
-        "172.16.0.0/12"
-      ]
     }
   ],
   "outbounds": [
@@ -274,7 +270,7 @@
     "clash_api": {
       "external_controller": "0.0.0.0:9091",
       "external_ui": "ui",
-      "external_ui_download_url": "https://github.com/MetaCubeX/metacubexd/releases/download/v1.241.3/compressed-dist.tgz",
+      "external_ui_download_url": "https://github.com/MetaCubeX/metacubexd/archive/refs/heads/gh-pages.zip",
       "external_ui_download_detour": "Proxy",
       "secret": ""
     }
