@@ -70,6 +70,9 @@ done
 
 echo "[*] 下载成功，正在处理并生成 dnsmasq 规则 (这可能需要几秒钟)..."
 
+# 确保配置目录存在
+mkdir -p "$CONF_DIR" || { echo "[!] 无法创建配置目录 $CONF_DIR"; exit 1; }
+
 # 使用 awk 进行高性能文本处理
 awk -v dns="$DNS_SERVER" -v tbl="$NFT_FAMILY_TABLE" -v set4="$NFT_SET_V4" -v set6="$NFT_SET_V6" '
 BEGIN {
@@ -87,11 +90,8 @@ BEGIN {
     # 1. 生成 DNS 转发规则 (防污染)
     printf("server=/%s/%s\n", domain, dns);
 
-    # 2. 生成 IPv4 的 nftset 规则
-    printf("nftset=/%s/4#%s#%s\n", domain, tbl, set4);
-
-    # 3. 生成 IPv6 的 nftset 规则
-    printf("nftset=/%s/6#%s#%s\n", domain, tbl, set6);
+    # 2 & 3. 生成 IPv4 和 IPv6 的 nftset 规则（合并为一行）
+    printf("nftset=/%s/4#%s#%s,6#%s#%s\n", domain, tbl, set4, tbl, set6);
 }' "$TMP_FILE" > "$PROXY_CONF"
 
 rm -f "$TMP_FILE"
