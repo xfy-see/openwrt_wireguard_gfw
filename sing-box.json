@@ -31,7 +31,7 @@
         "rule_set": [
           "geosite-google"
         ],
-        "server": "us-dns"
+        "server": "proxy-dns"
       }
     ],
     "final": "proxy-dns",
@@ -263,7 +263,7 @@
       }
     ],
     "final": "Proxy",
-    "default_domain_resolver": "cn-dns",
+    "default_domain_resolver": "proxy-dns",
     "auto_detect_interface": true
   },
   "experimental": {
