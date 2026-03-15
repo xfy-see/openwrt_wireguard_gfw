@@ -28,8 +28,12 @@ echo "[*] 当前 $NFT_SET_V4 中约有 $count_before_v4 条记录"
 echo "[*] 当前 $NFT_SET_V6 中约有 $count_before_v6 条记录"
 
 # 4. 执行 DNS 查询触发联动
-echo "[*] 正在执行 nslookup $TEST_DOMAIN ..."
-nslookup "$TEST_DOMAIN" 127.0.0.1 > /dev/null
+echo "[*] 正在执行 nslookup -query=A $TEST_DOMAIN (触发 IPv4 联动)..."
+nslookup -query=A "$TEST_DOMAIN" 127.0.0.1 > /dev/null 2>&1
+
+echo "[*] 正在执行 nslookup -query=AAAA $TEST_DOMAIN (触发 IPv6 联动)..."
+nslookup -query=AAAA "$TEST_DOMAIN" ::1 > /dev/null 2>&1
+
 # 稍微等待 dnsmasq 异步写入 nftset
 sleep 1
 
