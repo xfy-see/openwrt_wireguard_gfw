@@ -72,7 +72,6 @@ chain output_wg {
 chain masq_wg {
     type nat hook postrouting priority srcnat; policy accept;
     oifname "$WG_IFACE" meta mark $MARK_GFW masquerade
-    oifname "$WG_IFACE" meta mark 0x00003c25 masquerade
 }
 
 EOF
@@ -94,9 +93,10 @@ EOF
     # --------------------------------------------------
     # 2. 生成 dnsmasq 配置并重启服务
     # --------------------------------------------------
-    if ! grep -q "conf-dir=/etc/dnsmasq.d" /etc/dnsmasq.conf 2>/dev/null; then
-        mkdir -p /etc/dnsmasq.d
-        echo "conf-dir=/etc/dnsmasq.d" >> /etc/dnsmasq.conf
+    mkdir -p /etc/dnsmasq.d
+    if [ "$(uci -q get dhcp.@dnsmasq[0].confdir)" != "/etc/dnsmasq.d" ]; then
+        uci set dhcp.@dnsmasq[0].confdir="/etc/dnsmasq.d"
+        uci commit dhcp
     fi
 
     # 调用 update-proxy-domains.sh 下载 gfwlist 并生成 dnsmasq 规则

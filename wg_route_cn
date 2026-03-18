@@ -197,9 +197,10 @@ CHAINS
     CN_DNS="${CN_DNS:-223.5.5.5}"
     echo "[wg_route_cn] CN 域名 DNS: $CN_DNS，非 CN 域名 DNS: 8.8.8.8 via wg_aws"
 
-    if ! grep -q "conf-dir=/etc/dnsmasq.d" /etc/dnsmasq.conf 2>/dev/null; then
-        mkdir -p /etc/dnsmasq.d
-        echo "conf-dir=/etc/dnsmasq.d" >> /etc/dnsmasq.conf
+    mkdir -p /etc/dnsmasq.d
+    if [ "$(uci -q get dhcp.@dnsmasq[0].confdir)" != "/etc/dnsmasq.d" ]; then
+        uci set dhcp.@dnsmasq[0].confdir="/etc/dnsmasq.d"
+        uci commit dhcp
     fi
 
     # 启用 noresolv + 设置唯一全局上游
