@@ -71,8 +71,8 @@ chain output_wg {
 
 chain masq_wg {
     type nat hook postrouting priority srcnat; policy accept;
-    oifname "wg_aws" meta mark 0x1 masquerade
-    oifname "wg_aws" meta mark 0x00003c25 masquerade
+    oifname "$WG_IFACE" meta mark $MARK_GFW masquerade
+    oifname "$WG_IFACE" meta mark 0x00003c25 masquerade
 }
 
 EOF
