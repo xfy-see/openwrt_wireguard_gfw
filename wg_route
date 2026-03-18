@@ -21,11 +21,11 @@ start() {
     # --------------------------------------------------
     # 0. 检查并安装 dnsmasq-full
     # --------------------------------------------------
-    if ! opkg list-installed 2>/dev/null | grep -q "dnsmasq-full"; then
+    if ! apk info dnsmasq-full >/dev/null 2>&1; then
         echo "📦 [wg_route] 正在安装 dnsmasq-full (支持 nftset)..."
-        opkg update
-        opkg remove dnsmasq 2>/dev/null
-        opkg install dnsmasq-full
+        apk update
+        apk del dnsmasq 2>/dev/null
+        apk add dnsmasq-full
     fi
 
     # --------------------------------------------------
@@ -50,6 +50,7 @@ set gfw_list_v6 {
     type ipv6_addr
     flags interval
     elements = {
+        2001:4860:4860::8888,
         # Telegram IPv6
         2001:b28:f23d::/48, 2001:b28:f23f::/48, 2001:67c:4e8::/48
     }
@@ -70,7 +71,8 @@ chain output_wg {
 
 chain masq_wg {
     type nat hook postrouting priority srcnat; policy accept;
-    oifname "$WG_IFACE" meta mark $MARK_GFW masquerade
+    oifname "wg_aws" meta mark 0x1 masquerade
+    oifname "wg_aws" meta mark 0x00003c25 masquerade
 }
 
 EOF

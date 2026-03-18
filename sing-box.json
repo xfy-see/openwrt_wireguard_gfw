@@ -45,7 +45,6 @@
       "auto_route": true,
       "strict_route": true,
       "stack": "gvisor",
-      "sniff": true,
       "route_exclude_address": [
         "192.168.0.0/16",
         "10.0.0.0/8",
@@ -56,9 +55,7 @@
       "type": "mixed",
       "tag": "mixed-in",
       "listen": "0.0.0.0",
-      "listen_port": 7890,
-      "sniff": true,
-      "sniff_override_destination": true
+      "listen_port": 7890
     }
   ],
   "outbounds": [
@@ -69,7 +66,7 @@
     },
     {
       "type": "shadowsocks",
-      "tag": "ss-tokyo-aws",
+      "tag": "ss-tokyo-aws-ipv6",
       "server": "2406:da14:194:900:90a3:e05f:fc64:6efe",
       "server_port": 18748,
       "method": "aes-256-gcm",
@@ -146,10 +143,10 @@
       "type": "selector",
       "tag": "日本",
       "outbounds": [
-        "ss-tokyo-aws",
+        "ss-tokyo-aws-ipv6",
         "wg-aws-out"
       ],
-      "default": "ss-tokyo-aws"
+      "default": "ss-tokyo-aws-ipv6"
     },
     {
       "type": "selector",

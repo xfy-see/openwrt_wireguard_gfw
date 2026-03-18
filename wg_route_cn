@@ -1,0 +1,310 @@
+#!/bin/sh /etc/rc.common
+
+# 启动优先级（99：在系统和网络完全启动后执行）
+START=99
+STOP=10
+
+# ================= 配置区 =================
+WG_IFACE="wg_aws"
+NFT_TABLE="fw4"
+
+# CN IP sets 文件（由 geoip2nftset.py 生成，或在有 python3 的机器上预生成后传入）
+CN_NFT_SETS="/etc/nftables.d/cn_direct.nft"
+
+# 合并后的 nft 文件（sets + 链规则，每次启动时动态生成）
+CN_NFT_RULES="/etc/nftables.d/cn_route.nft"
+
+# dnsmasq CN 域名直连配置
+DNSMASQ_CONF="/etc/dnsmasq.d/cn-direct.conf"
+
+# 路由标记和策略路由表
+MARK_GFW="0x1"
+TABLE_GFW="100"
+
+# Python 脚本路径（可选，有 python3 时自动生成 CN IP/域名列表）
+GEOIP_SCRIPT="/etc/gfwlist/geoip2nftset.py"
+GEOSITE_SCRIPT="/etc/gfwlist/geosite2nftset.py"
+# ==========================================
+
+# 从 `wg show <iface> endpoints` 输出提取端点 IP（去掉端口和方括号）
+# IPv4: 1.2.3.4:28747       → 1.2.3.4
+# IPv6: [2406::1]:28747     → 2406::1
+_get_wg_endpoint_ip() {
+    wg show "$1" endpoints 2>/dev/null \
+        | awk '{print $2}' \
+        | sed 's/^\[\(.*\)\]:[0-9]*$/\1/; s/^\([0-9.][0-9.]*\):[0-9]*$/\1/' \
+        | grep -v -E '^\s*$|\(none\)' \
+        | head -1
+}
+
+# 根据 IP 地址格式返回 nft 地址族关键字（ip / ip6）
+_ip_family() {
+    case "$1" in *:*) echo "ip6";; *) echo "ip";; esac
+}
+
+# 清理 nftables 中由本脚本创建的链和 set（stop/start 时调用）
+_nft_cleanup() {
+    for chain in prerouting_wg output_wg masq_wg; do
+        nft flush chain inet "$NFT_TABLE" "$chain" 2>/dev/null
+        nft delete chain inet "$NFT_TABLE" "$chain" 2>/dev/null
+    done
+    nft delete set inet "$NFT_TABLE" cn_list_v4 2>/dev/null
+    nft delete set inet "$NFT_TABLE" cn_list_v6 2>/dev/null
+}
+
+start() {
+    echo "[wg_route_cn] 开始配置 CN 直连分流环境..."
+
+    # --------------------------------------------------
+    # 0. 检查并安装 dnsmasq-full（支持 nftset 指令）
+    # --------------------------------------------------
+    if ! apk info dnsmasq-full >/dev/null 2>&1; then
+        echo "[wg_route_cn] 安装 dnsmasq-full..."
+        apk update
+        apk del dnsmasq 2>/dev/null
+        apk add dnsmasq-full
+    fi
+
+    # --------------------------------------------------
+    # 1. 获取 CN IP sets 文件
+    # --------------------------------------------------
+    mkdir -p /etc/nftables.d
+
+    # 仅在文件缺失或为空时才触发生成（避免每次启动都重下 ~19MB 的 geoip.dat）
+    if [ ! -s "$CN_NFT_SETS" ]; then
+        echo "[wg_route_cn] $CN_NFT_SETS 不存在，尝试从 geoip.dat 生成..."
+        if command -v python3 >/dev/null 2>&1 && [ -f "$GEOIP_SCRIPT" ]; then
+            python3 "$GEOIP_SCRIPT" -c CN -o "$CN_NFT_SETS" \
+                && echo "[wg_route_cn] CN IP sets 已生成（$(wc -l < "$CN_NFT_SETS") 行）" \
+                || echo "[wg_route_cn] 警告：生成失败"
+        else
+            echo "[wg_route_cn] python3 或 $GEOIP_SCRIPT 不可用，无法自动生成"
+        fi
+    else
+        echo "[wg_route_cn] 使用已有 CN IP sets（$(wc -l < "$CN_NFT_SETS") 行）"
+    fi
+
+    if [ ! -s "$CN_NFT_SETS" ]; then
+        echo "[wg_route_cn] 错误：$CN_NFT_SETS 不存在或为空"
+        echo "[wg_route_cn]   请在有 python3 的机器上执行："
+        echo "[wg_route_cn]   python3 geoip2nftset.py -c CN -o cn_direct.nft"
+        echo "[wg_route_cn]   ssh root@<路由器> 'cat > $CN_NFT_SETS' < cn_direct.nft"
+        return 1
+    fi
+
+    # --------------------------------------------------
+    # 2. 检测 WireGuard 端点 IP，准备豁免规则
+    # --------------------------------------------------
+    WG_EP_IP=$(_get_wg_endpoint_ip "$WG_IFACE")
+    if [ -n "$WG_EP_IP" ]; then
+        WG_EP_FAMILY=$(_ip_family "$WG_EP_IP")
+        EP_EXEMPTION="        $WG_EP_FAMILY daddr $WG_EP_IP return  # WG endpoint exemption"
+        echo "[wg_route_cn] WireGuard 端点: $WG_EP_IP (IPv${WG_EP_FAMILY#ip})"
+    else
+        EP_EXEMPTION=""
+        echo "[wg_route_cn] 警告：无法检测 WireGuard 端点 IP"
+        echo "[wg_route_cn]   WireGuard 握手流量可能被误导入隧道，导致连接失败"
+    fi
+
+    # --------------------------------------------------
+    # 3. 生成合并 nft 文件（CN IP sets + 链规则，写入同一 table 块）
+    # --------------------------------------------------
+    # CN_NFT_SETS 格式：首行 3 行注释，第 4 行 "table inet fw4 {"，末行 "}"
+    # 取第 4 行到倒数第 2 行（去掉外层 table 包装的首尾行）作为 sets 内容，
+    # 再拼上链规则，一起写入一个 table inet fw4 { } 块中。
+    SETS_LINES=$(wc -l < "$CN_NFT_SETS")
+    {
+        echo "# cn_route.nft — 由 wg_route_cn 在启动时生成，请勿手动修改"
+        echo "# WireGuard 端点: ${WG_EP_IP:-未检测到}"
+        echo "# 生成时间: $(date)"
+        echo ""
+        echo "table inet $NFT_TABLE {"
+        # 嵌入 CN IP sets（跳过文件前 4 行 header 和外层 table 行，跳过末行的 }）
+        sed -n "5,$((SETS_LINES - 1))p" "$CN_NFT_SETS"
+        cat << CHAINS
+
+    chain prerouting_wg {
+        type filter hook prerouting priority mangle; policy accept;
+        # 私有地址直连（内网不走代理）
+        ip daddr { 10.0.0.0/8, 127.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } return
+        ip6 daddr { ::1, fc00::/7, fe80::/10 } return
+$EP_EXEMPTION
+        # CN IP 直连，其余流量打 mark 走 wg_aws
+        ip daddr @cn_list_v4 return
+        ip6 daddr @cn_list_v6 return
+        meta mark set $MARK_GFW
+    }
+
+    chain output_wg {
+        type route hook output priority mangle; policy accept;
+        ip daddr { 10.0.0.0/8, 127.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16 } return
+        ip6 daddr { ::1, fc00::/7, fe80::/10 } return
+$EP_EXEMPTION
+        ip daddr @cn_list_v4 return
+        ip6 daddr @cn_list_v6 return
+        meta mark set $MARK_GFW
+    }
+
+    chain masq_wg {
+        type nat hook postrouting priority srcnat; policy accept;
+        oifname "$WG_IFACE" meta mark $MARK_GFW masquerade
+    }
+CHAINS
+        echo "}"
+    } > "$CN_NFT_RULES"
+
+    # --------------------------------------------------
+    # 4. 注册 fw4 UCI include 并重载防火墙
+    # --------------------------------------------------
+    # 仅注册 cn_route.nft（合并文件），fw4 reload 时会自动重新加载
+    if [ "$(uci -q get firewall.cn_nft.path)" != "/usr/sbin/nft -f $CN_NFT_RULES" ]; then
+        uci -q delete firewall.cn_nft
+        uci set firewall.cn_nft=include
+        uci set firewall.cn_nft.type='script'
+        uci set firewall.cn_nft.path="/usr/sbin/nft -f $CN_NFT_RULES"
+        uci set firewall.cn_nft.fw4_compatible='1'
+        uci commit firewall
+    fi
+
+    # 重载防火墙（重建 fw4 table），然后显式加载我们的规则
+    # 注：fw4 的 script 类型 include 在部分版本不被 reload 执行，
+    # 故在 fw4 reload 之后再次清理并显式 nft -f，保证规则正确加载
+    fw4 reload 2>/dev/null || /etc/init.d/firewall reload
+    _nft_cleanup
+    nft -f "$CN_NFT_RULES" || { echo "[wg_route_cn] 错误：nftables 规则加载失败"; return 1; }
+    echo "[wg_route_cn] nftables 规则已加载"
+
+    # --------------------------------------------------
+    # 5. 生成 dnsmasq CN 域名直连规则
+    # --------------------------------------------------
+    # 策略：
+    #   - noresolv=1：禁用 resolv.conf.auto（其中 1.1.1.1/1.0.0.1 来自 wg_aws，
+    #     多个全局上游会导致 CN 域名查询也被发往这些服务器，增加 ~1s 延迟）
+    #   - server=8.8.8.8：唯一全局默认上游，走 wg_aws（非 CN 域名走代理 DNS）
+    #   - server=/cn-domain/CN_DNS：CN 域名特定规则，走本地直连上游
+
+    # CN 域名上游：取第一个非 wg_aws、非链路本地、非本机的 nameserver，回退 223.5.5.5
+    SELF_IPS=$(ip -o addr show | awk '{print $4}' | cut -d/ -f1 | tr '\n' '|' | sed 's/|$//')
+    CN_DNS=$(awk -v wg="$WG_IFACE" -v self="$SELF_IPS" '
+        /^# Interface / { iface = $3; next }
+        /^nameserver / && iface != wg && $2 !~ /^fe80::/ && $2 !~ /^127\./ {
+            n = split(self, arr, "|")
+            is_self = 0
+            for (i = 1; i <= n; i++) if ($2 == arr[i]) { is_self = 1; break }
+            if (!is_self) { print $2; exit }
+        }
+    ' /tmp/resolv.conf.d/resolv.conf.auto 2>/dev/null)
+    CN_DNS="${CN_DNS:-223.5.5.5}"
+    echo "[wg_route_cn] CN 域名 DNS: $CN_DNS，非 CN 域名 DNS: 8.8.8.8 via wg_aws"
+
+    if ! grep -q "conf-dir=/etc/dnsmasq.d" /etc/dnsmasq.conf 2>/dev/null; then
+        mkdir -p /etc/dnsmasq.d
+        echo "conf-dir=/etc/dnsmasq.d" >> /etc/dnsmasq.conf
+    fi
+
+    # 启用 noresolv + 设置唯一全局上游
+    uci set dhcp.@dnsmasq[0].noresolv='1'
+    uci add_list dhcp.@dnsmasq[0].server='8.8.8.8'
+    uci commit dhcp
+
+
+    local update_ok=0
+    if command -v python3 >/dev/null 2>&1 && [ -f "$GEOSITE_SCRIPT" ]; then
+        echo "[wg_route_cn] 从 geosite.dat 提取 CN 域名列表..."
+        TMP_DOMAINS=$(mktemp /tmp/cn_domains_XXXXXX)
+        if python3 "$GEOSITE_SCRIPT" -c cn -l -o "$TMP_DOMAINS" && [ -s "$TMP_DOMAINS" ]; then
+            awk -v cn_dns="$CN_DNS" '
+            BEGIN {
+                print "# CN 域名直连规则，由 wg_route_cn 自动生成，请勿手动修改"
+            }
+            $1 != "" && $1 !~ /^#/ {
+                gsub(/\r/, "", $1)
+                printf "server=/%s/%s\n", $1, cn_dns
+            }' "$TMP_DOMAINS" > "$DNSMASQ_CONF" && update_ok=1
+        fi
+        rm -f "$TMP_DOMAINS"
+    fi
+
+    if [ "$update_ok" -eq 1 ]; then
+        CN_COUNT=$(grep -c "^server=" "$DNSMASQ_CONF" 2>/dev/null || echo 0)
+        echo "[wg_route_cn] dnsmasq CN 域名规则已生成（$CN_COUNT 条）"
+    else
+        echo "[wg_route_cn] 警告：python3/geosite2nftset.py 不可用，跳过 CN 域名规则"
+        echo "[wg_route_cn]   IP 段直连仍正常，但部分 CDN 解析到非 CN IP 时可能走代理"
+    fi
+
+    dnsmasq --test >/dev/null 2>&1 && /etc/init.d/dnsmasq restart
+    echo "[wg_route_cn] dnsmasq 已重启"
+
+    # --------------------------------------------------
+    # 6. 配置 network 策略路由（fwmark 0x1 → table 100 → wg_aws）
+    # --------------------------------------------------
+    local net_changed=0
+
+    if [ "$(uci -q get network.rule_gfw_v4.mark)" != "$MARK_GFW" ]; then
+        uci set network.rule_gfw_v4=rule
+        uci set network.rule_gfw_v4.mark="$MARK_GFW"
+        uci set network.rule_gfw_v4.lookup="$TABLE_GFW"
+
+        uci set network.route_gfw_v4=route
+        uci set network.route_gfw_v4.interface="$WG_IFACE"
+        uci set network.route_gfw_v4.table="$TABLE_GFW"
+        uci set network.route_gfw_v4.target='0.0.0.0/0'
+
+        uci set network.rule_gfw_v6=rule6
+        uci set network.rule_gfw_v6.mark="$MARK_GFW"
+        uci set network.rule_gfw_v6.lookup="$TABLE_GFW"
+
+        uci set network.route_gfw_v6=route6
+        uci set network.route_gfw_v6.interface="$WG_IFACE"
+        uci set network.route_gfw_v6.table="$TABLE_GFW"
+        uci set network.route_gfw_v6.target='::/0'
+
+        uci commit network
+        net_changed=1
+    fi
+
+    if [ "$net_changed" -eq 1 ]; then
+        /etc/init.d/network restart
+        echo "[wg_route_cn] 策略路由已写入 UCI 并重启网络"
+    else
+        echo "[wg_route_cn] 策略路由已存在，跳过网络重启"
+    fi
+
+    echo "[wg_route_cn] 启动完成！默认走代理，CN IP/域名直连 WAN"
+}
+
+stop() {
+    echo "[wg_route_cn] 正在清理..."
+
+    # 1. 恢复 dnsmasq
+    rm -f "$DNSMASQ_CONF"
+    uci delete dhcp.@dnsmasq[0].noresolv 2>/dev/null
+    uci del_list dhcp.@dnsmasq[0].server='8.8.8.8' 2>/dev/null
+    uci commit dhcp
+    /etc/init.d/dnsmasq restart
+    echo "[wg_route_cn] dnsmasq CN 域名规则已移除"
+
+    # 2. 清理 nftables 链和 sets
+    _nft_cleanup
+    # cn_route.nft（合并规则文件）删除；cn_direct.nft（IP sets 数据）保留，避免重复下载
+    rm -f "$CN_NFT_RULES"
+    uci -q delete firewall.cn_nft
+    uci commit firewall
+    fw4 reload 2>/dev/null || /etc/init.d/firewall reload
+    echo "[wg_route_cn] nftables 链和 sets 已清理"
+
+    # 3. 清理策略路由
+    if [ "$(uci -q get network.rule_gfw_v4.mark)" = "$MARK_GFW" ]; then
+        uci -q delete network.rule_gfw_v4
+        uci -q delete network.route_gfw_v4
+        uci -q delete network.rule_gfw_v6
+        uci -q delete network.route_gfw_v6
+        uci commit network
+        echo "[wg_route_cn] 策略路由已清理"
+        /etc/init.d/network restart
+        echo "[wg_route_cn] 策略路由已重启"
+    fi
+
+    echo "[wg_route_cn] 清理完成"
+}
