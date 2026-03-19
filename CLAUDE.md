@@ -20,7 +20,13 @@ The system routes GFW-blocked traffic through a WireGuard interface (`wg_aws`) u
 |------|------|
 | `wg_route` | OpenWrt init.d service (install to `/etc/init.d/wg_route`). Orchestrates everything: installs dnsmasq-full, writes nft rules to `/etc/nftables.d/gfwlist.nft`, configures policy routing via UCI, calls `update-proxy-domains.sh` |
 | `update-proxy-domains.sh` | Downloads GFW domain list from Loyalsoldier's `v2ray-rules-dat` release, appends extra AI/chat domains, generates `/etc/dnsmasq.d/gfw-proxy.conf` with `server=` and `nftset=` rules per domain |
-| `geosite2nftset.py` | Python 3 tool (no external deps) that parses `geosite.dat` protobuf binary and generates dnsmasq nftset configs for specific categories (e.g., google, cn) |
+| `src/geoip2nftset.c` | C tool that parses `geoip.dat` protobuf binary and generates nftables set definitions for country IP ranges (replaces `geoip2nftset.py`) |
+| `src/geosite2nftset.c` | C tool that parses `geosite.dat` protobuf binary and generates dnsmasq nftset configs for specific categories (replaces `geosite2nftset.py`) |
+| `src/protobuf.h` | Shared header-only protobuf decoder used by both C tools |
+| `src/util.h` | Shared utility header: colored output, file I/O, dynamic string arrays |
+| `Makefile` | Build system for C tools: `make` for local, `make CC=... LDFLAGS="-static"` for cross-compilation |
+| `geoip2nftset.py` | **Deprecated** — Python 3 version, superseded by C binary |
+| `geosite2nftset.py` | **Deprecated** — Python 3 version, superseded by C binary |
 | `verify-nftset.sh` | Validates the dnsmasq→nftset pipeline is working by querying a test domain and checking if nftables set entries increase |
 | `add-telegram-ip.sh` | Manually adds Telegram IP ranges (AS62041/AS62014) to the nftables sets |
 | `sing-box.json` | sing-box client config for use on client devices (not the router). Uses TUN mode with geosite/geoip rule sets, multiple outbound proxies (Shadowsocks, VLESS+Reality) with selector groups |
@@ -57,20 +63,39 @@ All scripts have a "配置区" (config section) at the top that must match acros
 - **dnsmasq config**: `/etc/dnsmasq.d/gfw-proxy.conf`
 - **nft rules file**: `/etc/nftables.d/gfwlist.nft`
 
-## `geosite2nftset.py` Usage
+## Building C Tools
 
 ```sh
-# Generate dnsmasq nftset config for a geosite category
-python3 geosite2nftset.py -c google -n "4#inet#fw4#gfw_list_v4" -o google.conf
+# Local build (macOS / Linux)
+make
 
-# Use local geosite.dat instead of auto-downloading
-python3 geosite2nftset.py -g /path/to/geosite.dat -c google -l -o google_domains.txt
-
-# List all available categories
-python3 geosite2nftset.py -g /path/to/geosite.dat --list-categories
+# Cross-compile for OpenWrt (aarch64 musl)
+make CC=aarch64-openwrt-linux-musl-gcc LDFLAGS="-static"
 ```
 
-The `geosite.proto` file documents the protobuf schema used by `geosite2nftset.py`.
+## `geoip2nftset` / `geosite2nftset` Usage
+
+```sh
+# Generate CN IP nftables set definition
+./geoip2nftset -g /path/to/geoip.dat -c CN -o cn_direct.nft
+
+# Generate CN CIDR list
+./geoip2nftset -g /path/to/geoip.dat -c CN -l -o cn_cidrs.txt
+
+# List all available country codes
+./geoip2nftset -g /path/to/geoip.dat --list-countries
+
+# Generate dnsmasq nftset config for a geosite category
+./geosite2nftset -g /path/to/geosite.dat -c google -n "4#inet#fw4#gfw_list_v4" -o google.conf
+
+# Generate domain list
+./geosite2nftset -g /path/to/geosite.dat -c cn -l -o cn_domains.txt
+
+# List all available categories
+./geosite2nftset -g /path/to/geosite.dat --list-categories
+```
+
+The `geosite.proto` file documents the protobuf schema used by the tools.
 
 ## `update-proxy-domains.sh` Environment Variables
 

@@ -1,3 +1,7 @@
 .claude
 .vscode
 backup_wg_10.66.66.1/
+
+# Compiled C binaries
+geoip2nftset
+geosite2nftset

@@ -21,9 +21,9 @@ DNSMASQ_CONF="/etc/dnsmasq.d/cn-direct.conf"
 MARK_GFW="0x1"
 TABLE_GFW="100"
 
-# Python 脚本路径（可选，有 python3 时自动生成 CN IP/域名列表）
-GEOIP_SCRIPT="/etc/gfwlist/geoip2nftset.py"
-GEOSITE_SCRIPT="/etc/gfwlist/geosite2nftset.py"
+# C 工具路径（静态编译的二进制，无需 python3）
+GEOIP_TOOL="/etc/gfwlist/geoip2nftset"
+GEOSITE_TOOL="/etc/gfwlist/geosite2nftset"
 # ==========================================
 
 # 从 `wg show <iface> endpoints` 输出提取端点 IP（去掉端口和方括号）
@@ -73,12 +73,15 @@ start() {
     # 仅在文件缺失或为空时才触发生成（避免每次启动都重下 ~19MB 的 geoip.dat）
     if [ ! -s "$CN_NFT_SETS" ]; then
         echo "[wg_route_cn] $CN_NFT_SETS 不存在，尝试从 geoip.dat 生成..."
-        if command -v python3 >/dev/null 2>&1 && [ -f "$GEOIP_SCRIPT" ]; then
-            python3 "$GEOIP_SCRIPT" -c CN -o "$CN_NFT_SETS" \
+        if [ -x "$GEOIP_TOOL" ]; then
+            # 下载 geoip.dat（若不存在）
+            GEOIP_DAT="/tmp/geoip.dat"
+            [ -f "$GEOIP_DAT" ] || wget -q -O "$GEOIP_DAT" "https://github.com/v2fly/geoip/releases/latest/download/geoip.dat"
+            "$GEOIP_TOOL" -g "$GEOIP_DAT" -c CN -o "$CN_NFT_SETS" \
                 && echo "[wg_route_cn] CN IP sets 已生成（$(wc -l < "$CN_NFT_SETS") 行）" \
                 || echo "[wg_route_cn] 警告：生成失败"
         else
-            echo "[wg_route_cn] python3 或 $GEOIP_SCRIPT 不可用，无法自动生成"
+            echo "[wg_route_cn] $GEOIP_TOOL 不可用，无法自动生成"
         fi
     else
         echo "[wg_route_cn] 使用已有 CN IP sets（$(wc -l < "$CN_NFT_SETS") 行）"
@@ -86,8 +89,7 @@ start() {
 
     if [ ! -s "$CN_NFT_SETS" ]; then
         echo "[wg_route_cn] 错误：$CN_NFT_SETS 不存在或为空"
-        echo "[wg_route_cn]   请在有 python3 的机器上执行："
-        echo "[wg_route_cn]   python3 geoip2nftset.py -c CN -o cn_direct.nft"
+        echo "[wg_route_cn]   请执行：geoip2nftset -g geoip.dat -c CN -o cn_direct.nft"
         echo "[wg_route_cn]   ssh root@<路由器> 'cat > $CN_NFT_SETS' < cn_direct.nft"
         return 1
     fi
@@ -210,10 +212,13 @@ CHAINS
 
 
     local update_ok=0
-    if command -v python3 >/dev/null 2>&1 && [ -f "$GEOSITE_SCRIPT" ]; then
+    if [ -x "$GEOSITE_TOOL" ]; then
         echo "[wg_route_cn] 从 geosite.dat 提取 CN 域名列表..."
+        # 下载 geosite.dat（若不存在）
+        GEOSITE_DAT="/tmp/geosite.dat"
+        [ -f "$GEOSITE_DAT" ] || wget -q -O "$GEOSITE_DAT" "https://github.com/v2fly/domain-list-community/releases/latest/download/dlc.dat"
         TMP_DOMAINS=$(mktemp /tmp/cn_domains_XXXXXX)
-        if python3 "$GEOSITE_SCRIPT" -c cn -l -o "$TMP_DOMAINS" && [ -s "$TMP_DOMAINS" ]; then
+        if "$GEOSITE_TOOL" -g "$GEOSITE_DAT" -c cn -l -o "$TMP_DOMAINS" && [ -s "$TMP_DOMAINS" ]; then
             awk -v cn_dns="$CN_DNS" '
             BEGIN {
                 print "# CN 域名直连规则，由 wg_route_cn 自动生成，请勿手动修改"
@@ -230,7 +235,7 @@ CHAINS
         CN_COUNT=$(grep -c "^server=" "$DNSMASQ_CONF" 2>/dev/null || echo 0)
         echo "[wg_route_cn] dnsmasq CN 域名规则已生成（$CN_COUNT 条）"
     else
-        echo "[wg_route_cn] 警告：python3/geosite2nftset.py 不可用，跳过 CN 域名规则"
+        echo "[wg_route_cn] 警告：$GEOSITE_TOOL 不可用，跳过 CN 域名规则"
         echo "[wg_route_cn]   IP 段直连仍正常，但部分 CDN 解析到非 CN IP 时可能走代理"
     fi
 

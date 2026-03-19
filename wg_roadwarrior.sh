@@ -21,7 +21,7 @@ export WG_WAN4_FWZONE="wan"
 export WG_FWZONE="lan"
 
 ##An IPv4 /24 subnet (without last octet) for the IPv4 tunnel
-export WG_IPV4_SUBNET="192.168.10"
+export WG_IPV4_SUBNET="10.66.67"
 
 ## To use only IPv4 in the tunnel, leave the rest of these
 ## variables below commented out.
