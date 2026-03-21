@@ -2,8 +2,3 @@
 .vscode
 backup_wg_10.66.66.1/
 wg_vpn_backup/
-
-# Compiled C binaries
-geoip2nftset
-geosite2nftset
-bin/
