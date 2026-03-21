@@ -21,33 +21,26 @@ NFT_SET_V6="gfw_list_v6"
 RULE_URLS="https://raw.githubusercontent.com/Loyalsoldier/v2ray-rules-dat/release/gfw.txt https://cdn.jsdelivr.net/gh/Loyalsoldier/v2ray-rules-dat@release/gfw.txt"
 TMP_FILE="/tmp/gfw_raw.txt"
 
-# 下载绑定的网络接口 (可通过环境变量 BIND_IFACE 传入，如 wg_aws)
-# 设置后 wget 会通过该接口的 IP 下载，用于翻墙下载 gfwlist
+# 下载绑定的网络接口 (可通过环境变量 BIND_IFACE 传入，如 wg0)
+# 设置后通过临时 ip rule 让下载流量走该接口，用于翻墙下载 gfwlist
 BIND_IFACE="${BIND_IFACE:-}"
 # ============================================
 
 echo "[*] 开始下载最新的代理域名列表..."
 
-# 如果指定了绑定接口，获取其 IP 地址用于 wget --bind-address
-WGET_BIND=""
+# 如果指定了绑定接口，临时添加高优先级默认路由走该接口
+_BIND_RULE_ADDED=""
 if [ -n "$BIND_IFACE" ]; then
-    # 优先取 IPv4，没有则取 IPv6 全局地址 (排除 fe80 link-local)
-    BIND_IP=$(ip -4 addr show dev "$BIND_IFACE" 2>/dev/null | grep -oE 'inet [0-9.]+' | awk '{print $2}')
-    if [ -z "$BIND_IP" ]; then
-        BIND_IP=$(ip -6 addr show dev "$BIND_IFACE" scope global 2>/dev/null | grep -oE 'inet6 [0-9a-f:]+' | awk '{print $2}')
-    fi
-    if [ -n "$BIND_IP" ]; then
-        WGET_BIND="--bind-address=$BIND_IP"
-        echo "[*] 使用接口 $BIND_IFACE ($BIND_IP) 下载"
-    else
-        echo "[!] 接口 $BIND_IFACE 无可用 IP 地址，使用默认路由下载"
-    fi
+    ip route add default dev "$BIND_IFACE" table 99 2>/dev/null
+    ip rule add lookup 99 prio 1 2>/dev/null
+    _BIND_RULE_ADDED=1
+    echo "[*] 使用接口 $BIND_IFACE 下载 (临时默认路由)"
 fi
 
 # 尝试从多个URL下载，直到成功
 for url in $RULE_URLS; do
     echo "[*] 尝试从 $url 下载..."
-    wget $WGET_BIND -q -O "$TMP_FILE" "$url"
+    uclient-fetch --no-check-certificate -q -O "$TMP_FILE" "$url"
 
     if [ -s "$TMP_FILE" ]; then
         echo "[√] 从 $url 下载成功！"
@@ -56,18 +49,62 @@ for url in $RULE_URLS; do
     echo "[!] 从 $url 下载失败，尝试下一个地址..."
 done
 
+# 清理临时路由
+if [ -n "$_BIND_RULE_ADDED" ]; then
+    ip rule del lookup 99 prio 1 2>/dev/null
+    ip route del default dev "$BIND_IFACE" table 99 2>/dev/null
+fi
+
 if [ ! -s "$TMP_FILE" ]; then
     echo "[!] 所有地址都下载失败，请检查网络连通性 (可能需要临时开启全局代理)。"
     exit 1
 fi
 
-# 追加 gfw.txt 中缺失的域名 (例如 .google 结尾的域名)
-EXTRA_DOMAINS="google antigravity.google openai.com chatgpt.com claude.ai anthropic.com chat.com chatgpt.livekit.cloud host.livekit.cloud oaistatic.com oaiusercontent.com claude.com claudeusercontent.com claudemcpclient.com servd-anthropic-website.b-cdn.net gemini.google.com generativelanguage.googleapis.com aistudio.google.com deepmind.com deepmind.google google-deepmind.com"
-for d in $EXTRA_DOMAINS; do
+# 从 domain-list-community 下载 AI 相关分类域名，追加到 gfw 列表
+# 分类列表：openai, anthropic, google-deepmind (含 gemini), perplexity, xai, cursor, huggingface, github-copilot
+AI_CATEGORIES="openai anthropic google-deepmind perplexity xai cursor huggingface github-copilot"
+AI_BASE_URL="https://raw.githubusercontent.com/v2fly/domain-list-community/master/data"
+AI_TMP="/tmp/ai_domains_raw.txt"
+
+echo "[*] 下载 AI 相关域名分类..."
+ai_count=0
+: > "$AI_TMP"
+for cat in $AI_CATEGORIES; do
+    if uclient-fetch --no-check-certificate -q -O - "$AI_BASE_URL/$cat" >> "$AI_TMP" 2>/dev/null; then
+        echo "[√] 分类 $cat 下载成功"
+    else
+        echo "[!] 分类 $cat 下载失败，跳过"
+    fi
+done
+
+# 从下载内容中提取纯域名（跳过注释、空行、full:前缀、regexp:、include:、@属性标记）
+awk '{
+    gsub(/\r/, "")
+    # 跳过空行、注释、regexp、include 指令
+    if ($0 ~ /^[[:space:]]*$/ || $0 ~ /^#/ || $0 ~ /^regexp:/ || $0 ~ /^include:/) next
+    # 去掉 full: 前缀
+    sub(/^full:/, "")
+    # 取第一个字段（去掉 @ads 等属性标记）
+    domain = $1
+    # 跳过含通配符或非域名的行
+    if (domain ~ /[*{}|]/ || domain !~ /\./) next
+    print domain
+}' "$AI_TMP" | sort -u | while read -r d; do
+    if ! grep -qx "$d" "$TMP_FILE"; then
+        echo "$d" >> "$TMP_FILE"
+        ai_count=$((ai_count + 1))
+    fi
+done
+rm -f "$AI_TMP"
+
+# 补充 gfw.txt 中缺失的顶级 google 域名（不在任何分类中）
+for d in google antigravity.google; do
     if ! grep -qx "$d" "$TMP_FILE"; then
         echo "$d" >> "$TMP_FILE"
     fi
 done
+
+echo "[*] AI 域名追加完成"
 
 echo "[*] 下载成功，正在处理并生成 dnsmasq 规则 (这可能需要几秒钟)..."
 

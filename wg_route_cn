@@ -5,7 +5,7 @@ START=99
 STOP=10
 
 # ================= 配置区 =================
-WG_IFACE="wg_aws"
+WG_IFACE="wg0"
 NFT_TABLE="fw4"
 
 # CN IP sets 文件（由 geoip2nftset.py 生成，或在有 python3 的机器上预生成后传入）

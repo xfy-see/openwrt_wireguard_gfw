@@ -16,7 +16,7 @@ TABLE_GFW="100"
 # ==========================================
 
 start() {
-    echo "🚀 [wg_route] 开始配置 wg_aws 分流环境..."
+    echo "🚀 [wg_route] 开始配置 $WG_IFACE 分流环境..."
 
     # --------------------------------------------------
     # 0. 检查并安装 dnsmasq-full
@@ -33,7 +33,9 @@ start() {
     # --------------------------------------------------
     mkdir -p /etc/nftables.d
     cat << EOF > "$NFT_FILE"
-    
+
+table inet $NFT_TABLE {
+
 # --- Sets ---
 set gfw_list_v4 {
     type ipv4_addr
@@ -73,6 +75,8 @@ chain masq_wg {
     type nat hook postrouting priority srcnat; policy accept;
     oifname "$WG_IFACE" meta mark $MARK_GFW masquerade
 }
+
+} # end table inet $NFT_TABLE
 
 EOF
     
