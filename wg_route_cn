@@ -53,6 +53,8 @@ _nft_cleanup() {
 }
 
 start() {
+    echo "[wg_route_cn] 延迟 5 秒等待网络就绪..."
+    sleep 5
     echo "[wg_route_cn] 开始配置 CN 直连分流环境..."
 
     # --------------------------------------------------
@@ -71,6 +73,11 @@ start() {
     mkdir -p /etc/nftables.d
 
     # 仅在文件缺失或为空时才触发生成（避免每次启动都重下 ~19MB 的 geoip.dat）
+    # 优先从 stop 时的备份恢复
+    if [ ! -s "$CN_NFT_SETS" ] && [ -s /tmp/cn_direct.nft.bak ]; then
+        cp -f /tmp/cn_direct.nft.bak "$CN_NFT_SETS"
+        echo "[wg_route_cn] 从备份恢复 CN IP sets"
+    fi
     if [ ! -s "$CN_NFT_SETS" ]; then
         echo "[wg_route_cn] $CN_NFT_SETS 不存在，尝试从 geoip.dat 生成..."
         if [ -x "$GEOIP_TOOL" ]; then
@@ -293,8 +300,9 @@ stop() {
 
     # 2. 清理 nftables 链和 sets
     _nft_cleanup
-    # cn_route.nft（合并规则文件）删除；cn_direct.nft（IP sets 数据）保留，避免重复下载
-    rm -f "$CN_NFT_RULES"
+    # 备份 cn_direct.nft 到 /tmp 后删除（避免 fw4 自动加载导致网络异常）
+    [ -s "$CN_NFT_SETS" ] && cp -f "$CN_NFT_SETS" /tmp/cn_direct.nft.bak
+    rm -f "$CN_NFT_RULES" "$CN_NFT_SETS"
     uci -q delete firewall.cn_nft
     uci commit firewall
     fw4 reload 2>/dev/null || /etc/init.d/firewall reload

@@ -104,7 +104,14 @@ for d in google antigravity.google; do
     fi
 done
 
-echo "[*] AI 域名追加完成"
+# 补充 Docker Hub 相关域名
+for d in docker.com docker.io dockerstatic.com; do
+    if ! grep -qx "$d" "$TMP_FILE"; then
+        echo "$d" >> "$TMP_FILE"
+    fi
+done
+
+echo "[*] AI 域名及补充域名追加完成"
 
 echo "[*] 下载成功，正在处理并生成 dnsmasq 规则 (这可能需要几秒钟)..."
 

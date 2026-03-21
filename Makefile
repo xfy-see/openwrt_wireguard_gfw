@@ -6,10 +6,10 @@
 #   make clean
 
 CC      ?= cc
-CFLAGS  ?= -O2 -Wall -Wextra -Wno-unused-parameter -std=c11
+CFLAGS  ?= -O2 -Wall -Wextra -Wno-unused-parameter -std=gnu11
 LDFLAGS ?=
 
-SRCDIR  = src
+SRCDIR  = src/c
 TARGETS = geoip2nftset geosite2nftset
 
 .PHONY: all clean
